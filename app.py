@@ -1,7 +1,7 @@
 # ============================================================
 # APP STREAMLIT QUẢN LÝ KPI GIA HẠN DỊCH VỤ CNTT / VIỄN THÔNG
-# Đọc Google Sheets dạng Excel nhiều sheet
-# Xử lý KPI cho 5 nhân sự
+# Đọc dữ liệu Google Sheets dạng Excel nhiều sheet
+# Tính KPI ngày / tuần / tháng cho 5 nhân sự
 # ============================================================
 
 import streamlit as st
@@ -57,7 +57,11 @@ SKIP_SHEETS = [
 
 # ============================================================
 # 4. HÀM CHUẨN HÓA CHUỖI
-# Dùng để bỏ dấu, đưa về chữ thường, xóa khoảng trắng thừa.
+# Rất quan trọng:
+# - Bỏ dấu tiếng Việt
+# - Chuyển Đ/đ thành D/d
+# - Đưa về chữ thường
+# - Xóa khoảng trắng thừa
 # ============================================================
 
 def normalize_text(value):
@@ -65,13 +69,17 @@ def normalize_text(value):
         return ""
 
     text = str(value).strip().lower()
+
+    # Bắt buộc xử lý riêng chữ đ/Đ vì unicodedata không tự đổi đ -> d
+    text = text.replace("đ", "d").replace("Đ", "D")
+
     text = unicodedata.normalize("NFD", text)
     text = "".join(
         char for char in text
         if unicodedata.category(char) != "Mn"
     )
-    text = " ".join(text.split())
 
+    text = " ".join(text.split())
     return text
 
 
@@ -172,7 +180,7 @@ def find_column(df, possible_names):
         for name in possible_names
     ]
 
-    # Khớp chính xác trước
+    # Ưu tiên khớp chính xác
     for name in possible_names_norm:
         if name in normalized_columns:
             return normalized_columns[name]
@@ -265,7 +273,6 @@ def standardize_one_sheet(sheet_df, sheet_name):
     )
 
     clean["Trạng Thái"] = data[status_col].astype(str).str.strip()
-
     clean["Loại Dịch Vụ"] = sheet_name
 
     clean = clean.dropna(subset=["Ngày Thực Hiện"])
@@ -370,7 +377,7 @@ def get_previous_month(year, month):
 # ============================================================
 # 11. LỌC DÒNG ĐÃ GIA HẠN
 # Điều kiện: Trạng thái chứa chữ "Đã gia hạn".
-# Có xử lý lower + bỏ dấu.
+# Sau khi chuẩn hóa, "Đã gia hạn" sẽ thành "da gia han".
 # ============================================================
 
 def filter_success_records(df):
@@ -743,6 +750,7 @@ with st.expander("📋 Xem bảng KPI tổng hợp ngày / tuần / tháng"):
 
 with st.expander("🧪 Kiểm tra dữ liệu đã đọc và sheet bị bỏ qua"):
     st.write("### Sheet bị bỏ qua hoặc không đủ cột")
+
     if skipped_info:
         for item in skipped_info:
             st.write("-", item)
@@ -751,6 +759,9 @@ with st.expander("🧪 Kiểm tra dữ liệu đã đọc và sheet bị bỏ qu
 
     st.write("### Dữ liệu đã chuẩn hóa")
     st.dataframe(clean_df.head(100), use_container_width=True, hide_index=True)
+
+    st.write("### Dữ liệu đã gia hạn")
+    st.dataframe(success_df.head(100), use_container_width=True, hide_index=True)
 
 
 # ============================================================
