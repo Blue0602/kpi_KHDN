@@ -1,6 +1,7 @@
 # ============================================================
 # APP STREAMLIT QUẢN LÝ KPI GIA HẠN DỊCH VỤ CNTT / VIỄN THÔNG
-# Tác giả: Senior Python Developer - Streamlit & Data Analysis
+# Đọc Google Sheets dạng Excel nhiều sheet
+# Xử lý KPI cho 5 nhân sự
 # ============================================================
 
 import streamlit as st
@@ -11,10 +12,8 @@ from datetime import datetime, timedelta, timezone
 
 
 # ============================================================
-# 1. XỬ LÝ TIMEZONE
-# Ưu tiên dùng pytz theo yêu cầu.
-# Nếu môi trường Streamlit Cloud chưa cài pytz thì tự fallback về timezone GMT+7.
-# Cách này giúp app không bị lỗi ModuleNotFoundError.
+# 1. TIMEZONE GMT+7
+# Ưu tiên dùng pytz. Nếu môi trường thiếu pytz thì tự fallback.
 # ============================================================
 
 try:
@@ -24,7 +23,7 @@ except ModuleNotFoundError:
 
 
 # ============================================================
-# 2. CẤU HÌNH TRANG STREAMLIT
+# 2. CẤU HÌNH STREAMLIT
 # ============================================================
 
 st.set_page_config(
@@ -35,7 +34,7 @@ st.set_page_config(
 
 
 # ============================================================
-# 3. KHAI BÁO BIẾN CỐ ĐỊNH
+# 3. THÔNG TIN CỐ ĐỊNH
 # ============================================================
 
 EXCEL_URL = "https://docs.google.com/spreadsheets/d/1J0H1GkxM2k74XB4LojPSLan5vtC_HRvT/export?format=xlsx"
@@ -57,12 +56,8 @@ SKIP_SHEETS = [
 
 
 # ============================================================
-# 4. HÀM CHUẨN HÓA CHỮ
-# Dùng để:
-# - Bỏ dấu tiếng Việt
-# - Đưa về chữ thường
-# - Xóa khoảng trắng thừa
-# - So sánh tên cột, trạng thái, tên nhân viên ổn định hơn
+# 4. HÀM CHUẨN HÓA CHUỖI
+# Dùng để bỏ dấu, đưa về chữ thường, xóa khoảng trắng thừa.
 # ============================================================
 
 def normalize_text(value):
@@ -70,41 +65,60 @@ def normalize_text(value):
         return ""
 
     text = str(value).strip().lower()
-
     text = unicodedata.normalize("NFD", text)
     text = "".join(
         char for char in text
         if unicodedata.category(char) != "Mn"
     )
-
     text = " ".join(text.split())
+
     return text
 
 
-def clean_column_name(col):
+def clean_column_name(value):
     """
     Chuẩn hóa tên cột an toàn.
-    Không dùng data.columns.str.strip() vì một số cột Excel có thể là số hoặc NaN.
+    Không dùng .str.strip() trực tiếp vì có sheet có cột rỗng hoặc cột dạng số.
     """
 
-    if pd.isna(col):
+    if pd.isna(value):
         return ""
 
-    return str(col).strip().title()
+    return str(value).strip().title()
+
+
+def make_unique_columns(columns):
+    """
+    Xử lý trường hợp tên cột bị trùng sau khi chuẩn hóa.
+    Ví dụ:
+    ['Trạng Thái', 'Trạng Thái'] -> ['Trạng Thái', 'Trạng Thái_2']
+    """
+
+    seen = {}
+    unique_cols = []
+
+    for col in columns:
+        col = clean_column_name(col)
+
+        if col == "":
+            col = "Cot_Rong"
+
+        if col not in seen:
+            seen[col] = 1
+            unique_cols.append(col)
+        else:
+            seen[col] += 1
+            unique_cols.append(f"{col}_{seen[col]}")
+
+    return unique_cols
 
 
 # ============================================================
-# 5. HÀM TÌM DÒ DÒNG HEADER TRONG TỪNG SHEET
-# Một số sheet Excel có thể không đặt header ở dòng đầu tiên.
-# Hàm này sẽ quét vài dòng đầu để tìm dòng có chứa các cột quan trọng.
+# 5. TÌM DÒNG HEADER THẬT TRONG SHEET
+# Một số sheet không có header ở dòng đầu tiên nên cần tự dò.
 # ============================================================
 
-def detect_header_row(raw_sheet_df, max_scan_rows=15):
-    """
-    Tìm dòng header thật trong sheet.
-    Nếu không tìm thấy thì mặc định dùng dòng đầu tiên.
-    """
-
+def detect_header_row(raw_sheet_df, max_scan_rows=20):
     important_keywords = [
         "nhan vien thuc hien",
         "nhan vien phu trach",
@@ -113,16 +127,17 @@ def detect_header_row(raw_sheet_df, max_scan_rows=15):
         "ngay thuc hien",
         "ngay gia han",
         "ngay xac thuc",
+        "ngay hoan thanh",
         "trang thai",
         "ket qua thuc hien",
         "ket qua",
         "tinh trang"
     ]
 
-    scan_limit = min(max_scan_rows, len(raw_sheet_df))
-
     best_row_index = 0
     best_score = 0
+
+    scan_limit = min(max_scan_rows, len(raw_sheet_df))
 
     for row_index in range(scan_limit):
         row_values = raw_sheet_df.iloc[row_index].tolist()
@@ -130,9 +145,9 @@ def detect_header_row(raw_sheet_df, max_scan_rows=15):
 
         score = 0
 
-        for cell_value in normalized_values:
+        for cell in normalized_values:
             for keyword in important_keywords:
-                if keyword == cell_value or keyword in cell_value:
+                if keyword == cell or keyword in cell:
                     score += 1
 
         if score > best_score:
@@ -143,82 +158,7 @@ def detect_header_row(raw_sheet_df, max_scan_rows=15):
 
 
 # ============================================================
-# 6. ĐỌC TOÀN BỘ SHEET TỪ GOOGLE SHEETS DẠNG EXCEL
-# Yêu cầu:
-# - Không dùng pd.read_csv
-# - Dùng pd.read_excel(..., sheet_name=None)
-# - Đọc toàn bộ sheet
-# - Bỏ qua sheet báo cáo
-# - Thêm cột Loại Dịch Vụ theo tên sheet
-# - Gộp tất cả sheet hợp lệ thành một DataFrame tổng
-# ============================================================
-
-@st.cache_data(ttl=300)
-def load_data_from_google_sheet(excel_url):
-    try:
-        raw_sheets = pd.read_excel(
-            excel_url,
-            sheet_name=None,
-            header=None,
-            engine="openpyxl"
-        )
-
-        combined_frames = []
-
-        for sheet_name, raw_sheet_df in raw_sheets.items():
-            if sheet_name in SKIP_SHEETS:
-                continue
-
-            if raw_sheet_df is None or raw_sheet_df.empty:
-                continue
-
-            raw_sheet_df = raw_sheet_df.dropna(axis=0, how="all")
-            raw_sheet_df = raw_sheet_df.dropna(axis=1, how="all")
-
-            if raw_sheet_df.empty:
-                continue
-
-            header_row = detect_header_row(raw_sheet_df)
-
-            headers = raw_sheet_df.iloc[header_row].tolist()
-            data_part = raw_sheet_df.iloc[header_row + 1:].copy()
-
-            data_part.columns = [clean_column_name(col) for col in headers]
-
-            data_part = data_part.dropna(axis=0, how="all")
-            data_part = data_part.dropna(axis=1, how="all")
-
-            if data_part.empty:
-                continue
-
-            data_part["Loại Dịch Vụ"] = sheet_name
-
-            combined_frames.append(data_part)
-
-        if not combined_frames:
-            st.error("❌ Không tìm thấy sheet dữ liệu hợp lệ để xử lý KPI.")
-            return pd.DataFrame()
-
-        final_df = pd.concat(
-            combined_frames,
-            ignore_index=True,
-            sort=False
-        )
-
-        return final_df
-
-    except Exception as e:
-        st.error(
-            "❌ Không thể đọc dữ liệu từ Google Sheets dạng Excel. "
-            "Vui lòng kiểm tra link chia sẻ, quyền truy cập hoặc kết nối mạng."
-        )
-        st.error(f"Chi tiết lỗi: {e}")
-        return pd.DataFrame()
-
-
-# ============================================================
-# 7. HÀM TÌM CỘT THEO NHIỀU TÊN CÓ THỂ CÓ
-# Giúp app chịu được việc mỗi sheet đặt tên cột hơi khác nhau.
+# 6. TÌM CỘT THEO NHIỀU TÊN CÓ THỂ XUẤT HIỆN
 # ============================================================
 
 def find_column(df, possible_names):
@@ -227,42 +167,57 @@ def find_column(df, possible_names):
         for col in df.columns
     }
 
-    normalized_possible_names = [
+    possible_names_norm = [
         normalize_text(name)
         for name in possible_names
     ]
 
-    for possible_name in normalized_possible_names:
-        if possible_name in normalized_columns:
-            return normalized_columns[possible_name]
+    # Khớp chính xác trước
+    for name in possible_names_norm:
+        if name in normalized_columns:
+            return normalized_columns[name]
 
-    for normalized_col, real_col in normalized_columns.items():
-        for possible_name in normalized_possible_names:
-            if possible_name in normalized_col or normalized_col in possible_name:
+    # Nếu không khớp chính xác thì dò gần đúng
+    for norm_col, real_col in normalized_columns.items():
+        for name in possible_names_norm:
+            if name in norm_col or norm_col in name:
                 return real_col
 
     return None
 
 
 # ============================================================
-# 8. LÀM SẠCH DỮ LIỆU
-# Yêu cầu:
-# - Chuẩn hóa tên cột
-# - Gộp cột Nhân Viên Phụ Trách thành Nhân Viên Thực Hiện
-# - Gộp Kết Quả Thực Hiện thành Trạng Thái
-# - Ép Ngày Thực Hiện về datetime
+# 7. CHUẨN HÓA 1 SHEET VỀ 4 CỘT CHÍNH
+# Cách này tránh lỗi concat do trùng tên cột.
 # ============================================================
 
-def standardize_dataframe(raw_df):
-    if raw_df.empty:
+def standardize_one_sheet(sheet_df, sheet_name):
+    if sheet_df is None or sheet_df.empty:
         return pd.DataFrame()
 
-    df = raw_df.copy()
+    raw = sheet_df.copy()
 
-    df.columns = [clean_column_name(col) for col in df.columns]
+    raw = raw.dropna(axis=0, how="all")
+    raw = raw.dropna(axis=1, how="all")
+
+    if raw.empty:
+        return pd.DataFrame()
+
+    header_row = detect_header_row(raw)
+
+    headers = raw.iloc[header_row].tolist()
+    data = raw.iloc[header_row + 1:].copy()
+
+    data.columns = make_unique_columns(headers)
+
+    data = data.dropna(axis=0, how="all")
+    data = data.dropna(axis=1, how="all")
+
+    if data.empty:
+        return pd.DataFrame()
 
     employee_col = find_column(
-        df,
+        data,
         [
             "Nhân Viên Thực Hiện",
             "Nhân Viên Phụ Trách",
@@ -274,7 +229,7 @@ def standardize_dataframe(raw_df):
     )
 
     date_col = find_column(
-        df,
+        data,
         [
             "Ngày Thực Hiện",
             "Ngày Gia Hạn",
@@ -286,7 +241,7 @@ def standardize_dataframe(raw_df):
     )
 
     status_col = find_column(
-        df,
+        data,
         [
             "Trạng Thái",
             "Kết Quả Thực Hiện",
@@ -296,103 +251,108 @@ def standardize_dataframe(raw_df):
         ]
     )
 
-    service_col = find_column(
-        df,
-        [
-            "Loại Dịch Vụ",
-            "Tên Dịch Vụ",
-            "Dịch Vụ",
-            "Loại Dv",
-            "Sản Phẩm",
-            "Tên Sản Phẩm"
-        ]
-    )
-
-    missing_columns = []
-
-    if employee_col is None:
-        missing_columns.append("Nhân Viên Thực Hiện / Nhân Viên Phụ Trách")
-
-    if date_col is None:
-        missing_columns.append("Ngày Thực Hiện")
-
-    if status_col is None:
-        missing_columns.append("Trạng Thái / Kết Quả Thực Hiện")
-
-    if missing_columns:
-        st.error(
-            "❌ Dữ liệu thiếu cột bắt buộc: "
-            + ", ".join(missing_columns)
-        )
-        st.info("👉 Hãy kiểm tra lại tên cột trong Google Sheets hoặc dòng header của các sheet.")
+    if employee_col is None or date_col is None or status_col is None:
         return pd.DataFrame()
 
-    clean_df = pd.DataFrame()
+    clean = pd.DataFrame()
 
-    clean_df["Nhân Viên Thực Hiện"] = (
-        df[employee_col]
-        .astype(str)
-        .str.strip()
-    )
+    clean["Nhân Viên Thực Hiện"] = data[employee_col].astype(str).str.strip()
 
-    clean_df["Ngày Thực Hiện"] = pd.to_datetime(
-        df[date_col],
+    clean["Ngày Thực Hiện"] = pd.to_datetime(
+        data[date_col],
         errors="coerce",
         dayfirst=True
     )
 
-    clean_df["Trạng Thái"] = (
-        df[status_col]
-        .astype(str)
-        .str.strip()
-    )
+    clean["Trạng Thái"] = data[status_col].astype(str).str.strip()
 
-    if service_col is not None:
-        clean_df["Loại Dịch Vụ"] = (
-            df[service_col]
-            .astype(str)
-            .str.strip()
-        )
-    else:
-        clean_df["Loại Dịch Vụ"] = "Chưa xác định"
+    clean["Loại Dịch Vụ"] = sheet_name
 
-    clean_df = clean_df.dropna(subset=["Ngày Thực Hiện"])
+    clean = clean.dropna(subset=["Ngày Thực Hiện"])
 
-    clean_df["Nhân Viên Chuẩn"] = clean_df["Nhân Viên Thực Hiện"].apply(normalize_text)
-    clean_df["Trạng Thái Chuẩn"] = clean_df["Trạng Thái"].apply(normalize_text)
+    clean["Nhân Viên Chuẩn"] = clean["Nhân Viên Thực Hiện"].apply(normalize_text)
+    clean["Trạng Thái Chuẩn"] = clean["Trạng Thái"].apply(normalize_text)
 
-    clean_df["Ngày"] = clean_df["Ngày Thực Hiện"].dt.date
-    clean_df["Năm"] = clean_df["Ngày Thực Hiện"].dt.year
-    clean_df["Tháng"] = clean_df["Ngày Thực Hiện"].dt.month
+    clean["Ngày"] = clean["Ngày Thực Hiện"].dt.date
+    clean["Năm"] = clean["Ngày Thực Hiện"].dt.year
+    clean["Tháng"] = clean["Ngày Thực Hiện"].dt.month
 
-    return clean_df
+    return clean
 
 
 # ============================================================
-# 9. XỬ LÝ GIỜ VIỆT NAM GMT+7
-# Nếu có pytz: dùng Asia/Ho_Chi_Minh.
-# Nếu không có pytz: dùng timezone cố định UTC+7.
+# 8. ĐỌC GOOGLE SHEETS DẠNG EXCEL NHIỀU SHEET
+# Không dùng pd.read_csv.
+# Có cache 5 phút.
+# ============================================================
+
+@st.cache_data(ttl=300)
+def load_data_from_google_sheet(excel_url):
+    try:
+        all_sheets = pd.read_excel(
+            excel_url,
+            sheet_name=None,
+            header=None,
+            engine="openpyxl"
+        )
+
+        valid_frames = []
+        skipped_info = []
+
+        for sheet_name, sheet_df in all_sheets.items():
+            if sheet_name in SKIP_SHEETS:
+                skipped_info.append(f"Bỏ qua sheet báo cáo: {sheet_name}")
+                continue
+
+            clean_sheet = standardize_one_sheet(sheet_df, sheet_name)
+
+            if clean_sheet.empty:
+                skipped_info.append(f"Bỏ qua sheet không đủ cột KPI: {sheet_name}")
+                continue
+
+            valid_frames.append(clean_sheet)
+
+        if len(valid_frames) == 0:
+            return pd.DataFrame(), skipped_info
+
+        final_df = pd.concat(
+            valid_frames,
+            ignore_index=True
+        )
+
+        return final_df, skipped_info
+
+    except Exception as e:
+        st.error(
+            "❌ Không thể đọc dữ liệu từ Google Sheets dạng Excel. "
+            "Vui lòng kiểm tra link chia sẻ, quyền truy cập hoặc kết nối mạng."
+        )
+        st.error(f"Chi tiết lỗi: {e}")
+        return pd.DataFrame(), []
+
+
+# ============================================================
+# 9. LẤY GIỜ VIỆT NAM GMT+7
 # ============================================================
 
 def get_current_vietnam_time():
     if pytz is not None:
-        vietnam_tz = pytz.timezone("Asia/Ho_Chi_Minh")
-        return datetime.now(vietnam_tz)
+        vn_tz = pytz.timezone("Asia/Ho_Chi_Minh")
+        return datetime.now(vn_tz)
 
-    vietnam_tz = timezone(timedelta(hours=7))
-    return datetime.now(vietnam_tz)
+    vn_tz = timezone(timedelta(hours=7))
+    return datetime.now(vn_tz)
 
 
 # ============================================================
 # 10. TÍNH TUẦN TRONG THÁNG
-# Không dùng .isocalendar().week vì hàm đó trả về tuần trong năm.
-#
+# Không dùng isocalendar().week.
 # Quy ước:
-# - Ngày 01 - 07: Tuần 1
-# - Ngày 08 - 14: Tuần 2
-# - Ngày 15 - 21: Tuần 3
-# - Ngày 22 - 28: Tuần 4
-# - Ngày 29 - 31: Tuần 5
+# 01-07: Tuần 1
+# 08-14: Tuần 2
+# 15-21: Tuần 3
+# 22-28: Tuần 4
+# 29-31: Tuần 5
 # ============================================================
 
 def get_week_of_month(date_value):
@@ -404,23 +364,21 @@ def get_week_of_month(date_value):
 def get_previous_month(year, month):
     if month == 1:
         return year - 1, 12
-
     return year, month - 1
 
 
 # ============================================================
-# 11. LỌC TRẠNG THÁI ĐÃ GIA HẠN
-# Điều kiện KPI:
-# Cột Trạng Thái chứa chữ "Đã gia hạn".
-# Có bỏ dấu và lower để tránh lỗi chữ hoa/thường.
+# 11. LỌC DÒNG ĐÃ GIA HẠN
+# Điều kiện: Trạng thái chứa chữ "Đã gia hạn".
+# Có xử lý lower + bỏ dấu.
 # ============================================================
 
-def filter_success_records(clean_df):
-    if clean_df.empty:
+def filter_success_records(df):
+    if df.empty:
         return pd.DataFrame()
 
-    success_df = clean_df[
-        clean_df["Trạng Thái Chuẩn"].str.contains(
+    success_df = df[
+        df["Trạng Thái Chuẩn"].str.contains(
             "da gia han",
             na=False
         )
@@ -514,10 +472,10 @@ def calculate_employee_kpi(success_df, employee_name, now_vn):
 
 
 def build_kpi_dataframe(success_df, now_vn):
-    kpi_rows = []
+    rows = []
 
     for employee in EMPLOYEES:
-        kpi_rows.append(
+        rows.append(
             calculate_employee_kpi(
                 success_df=success_df,
                 employee_name=employee,
@@ -525,11 +483,11 @@ def build_kpi_dataframe(success_df, now_vn):
             )
         )
 
-    return pd.DataFrame(kpi_rows)
+    return pd.DataFrame(rows)
 
 
 # ============================================================
-# 13. HEADER APP
+# 13. HEADER
 # ============================================================
 
 st.title("📊 Dashboard KPI Gia Hạn Dịch Vụ CNTT / Viễn Thông")
@@ -549,25 +507,24 @@ st.divider()
 
 
 # ============================================================
-# 14. LOAD VÀ XỬ LÝ DỮ LIỆU
+# 14. LOAD DỮ LIỆU
 # ============================================================
 
-raw_df = load_data_from_google_sheet(EXCEL_URL)
-
-if raw_df.empty:
-    st.warning("⚠️ Không có dữ liệu đầu vào hợp lệ.")
-    st.stop()
-
-clean_df = standardize_dataframe(raw_df)
+clean_df, skipped_info = load_data_from_google_sheet(EXCEL_URL)
 
 if clean_df.empty:
-    st.warning("⚠️ Dữ liệu sau khi làm sạch không hợp lệ.")
+    st.warning("⚠️ Không có dữ liệu đầu vào hợp lệ.")
+    with st.expander("🧪 Xem thông tin sheet bị bỏ qua"):
+        for item in skipped_info:
+            st.write("-", item)
     st.stop()
 
 success_df = filter_success_records(clean_df)
 
 if success_df.empty:
     st.warning("⚠️ Không tìm thấy dòng nào có trạng thái 'Đã gia hạn'.")
+    with st.expander("🧪 Xem dữ liệu đã đọc được"):
+        st.dataframe(clean_df.head(100), use_container_width=True, hide_index=True)
     st.stop()
 
 kpi_df = build_kpi_dataframe(success_df, now_vn)
@@ -584,6 +541,7 @@ with st.sidebar:
     st.write("**Định dạng đọc:** `.xlsx`")
     st.write("**Cache:** 300 giây")
     st.write("**Timezone:** Asia/Ho_Chi_Minh GMT+7")
+    st.write("**Số dòng dữ liệu hợp lệ:**", len(clean_df))
     st.write("**Số dòng đã gia hạn:**", len(success_df))
 
     st.divider()
@@ -689,10 +647,7 @@ with left_chart:
         showgrid=False
     )
 
-    st.plotly_chart(
-        fig_bar,
-        use_container_width=True
-    )
+    st.plotly_chart(fig_bar, use_container_width=True)
 
 with right_chart:
     fig_donut = px.pie(
@@ -715,10 +670,7 @@ with right_chart:
         margin=dict(l=20, r=20, t=60, b=20)
     )
 
-    st.plotly_chart(
-        fig_donut,
-        use_container_width=True
-    )
+    st.plotly_chart(fig_donut, use_container_width=True)
 
 st.divider()
 
@@ -762,9 +714,7 @@ else:
         ]
     ].copy()
 
-    table_df["Ngày Thực Hiện"] = table_df["Ngày Thực Hiện"].dt.strftime(
-        "%d/%m/%Y"
-    )
+    table_df["Ngày Thực Hiện"] = table_df["Ngày Thực Hiện"].dt.strftime("%d/%m/%Y")
 
     table_df = table_df.rename(
         columns={
@@ -784,27 +734,23 @@ else:
 # ============================================================
 
 with st.expander("📋 Xem bảng KPI tổng hợp ngày / tuần / tháng"):
-    st.dataframe(
-        kpi_df,
-        use_container_width=True,
-        hide_index=True
-    )
+    st.dataframe(kpi_df, use_container_width=True, hide_index=True)
 
 
 # ============================================================
-# 20. KIỂM TRA DỮ LIỆU SAU LÀM SẠCH
-# Dùng khi cần debug dữ liệu từ Google Sheets.
+# 20. DEBUG DỮ LIỆU
 # ============================================================
 
-with st.expander("🧪 Kiểm tra dữ liệu đã làm sạch"):
-    st.write("Số dòng dữ liệu sau làm sạch:", len(clean_df))
-    st.write("Số dòng trạng thái Đã gia hạn:", len(success_df))
+with st.expander("🧪 Kiểm tra dữ liệu đã đọc và sheet bị bỏ qua"):
+    st.write("### Sheet bị bỏ qua hoặc không đủ cột")
+    if skipped_info:
+        for item in skipped_info:
+            st.write("-", item)
+    else:
+        st.write("Không có sheet nào bị bỏ qua ngoài danh sách mặc định.")
 
-    st.dataframe(
-        clean_df.head(50),
-        use_container_width=True,
-        hide_index=True
-    )
+    st.write("### Dữ liệu đã chuẩn hóa")
+    st.dataframe(clean_df.head(100), use_container_width=True, hide_index=True)
 
 
 # ============================================================
@@ -814,7 +760,7 @@ with st.expander("🧪 Kiểm tra dữ liệu đã làm sạch"):
 st.divider()
 
 st.caption(
-    "Dashboard tự động đọc toàn bộ sheet hợp lệ từ Google Sheets Excel, "
+    "Dashboard tự động đọc nhiều sheet từ Google Sheets Excel, "
     "lọc trạng thái 'Đã gia hạn', tính KPI ngày / tuần / tháng, "
     "và cập nhật dữ liệu theo cache 5 phút."
 )
