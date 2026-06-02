@@ -1,6 +1,6 @@
 # ============================================================
 # APP STREAMLIT QUẢN LÝ KPI GIA HẠN DỊCH VỤ CNTT / VIỄN THÔNG
-# Tác giả: Senior Data Analyst & Streamlit Developer
+# Công nghệ sử dụng: Streamlit, Pandas, Plotly, pytz
 # ============================================================
 
 import streamlit as st
@@ -12,21 +12,21 @@ import unicodedata
 
 
 # ============================================================
-# 1. CẤU HÌNH TRANG STREAMLIT
+# 1. CẤU HÌNH TRANG
 # ============================================================
 
 st.set_page_config(
-    page_title="Dashboard KPI Gia Hạn DVCNTT",
+    page_title="Dashboard KPI Gia Hạn Dịch Vụ",
     page_icon="📊",
     layout="wide"
 )
 
 
 # ============================================================
-# 2. KHAI BÁO NGUỒN DỮ LIỆU GOOGLE SHEETS CSV
+# 2. KHAI BÁO THÔNG TIN CỐ ĐỊNH
 # ============================================================
 
-CSV_URL = "https://docs.google.com/spreadsheets/d/1J0H1GkxM2k74XB4LojPSLan5vtC_HRvT/export?format=csv&gid=1903922809"
+EXCEL_URL = "https://docs.google.com/spreadsheets/d/1J0H1GkxM2k74XB4LojPSLan5vtC_HRvT/export?format=xlsx"
 
 EMPLOYEES = [
     "Vương Thanh Thuận",
@@ -36,112 +36,223 @@ EMPLOYEES = [
     "Hoàng Thị Giang"
 ]
 
+SKIP_SHEETS = [
+    "Điểm tin Quý 1",
+    "DANH SÁCH GIA HẠN - GIANG",
+    "Sheet1",
+    "Sheet2"
+]
+
 
 # ============================================================
 # 3. HÀM CHUẨN HÓA CHUỖI
 # Mục đích:
-# - Xử lý khác biệt viết hoa / viết thường
-# - Xử lý dấu tiếng Việt
-# - Giúp dò tên cột linh hoạt hơn
+# - Bỏ dấu tiếng Việt
+# - Đưa về chữ thường
+# - Xóa khoảng trắng thừa
+# - Giúp so sánh trạng thái và tên cột ổn định hơn
 # ============================================================
 
-def normalize_text(text):
-    """
-    Chuẩn hóa text về dạng không dấu, chữ thường.
-    Ví dụ:
-    'KẾT QUẢ THỰC HIỆN' -> 'ket qua thuc hien'
-    """
-    if pd.isna(text):
+def normalize_text(value):
+    if pd.isna(value):
         return ""
 
-    text = str(text).strip().lower()
-
+    text = str(value).strip().lower()
     text = unicodedata.normalize("NFD", text)
     text = "".join(
         char for char in text
         if unicodedata.category(char) != "Mn"
     )
-
     text = " ".join(text.split())
+
     return text
 
 
-def find_column(df, possible_names):
+def clean_column_name(col):
     """
-    Tìm tên cột thật trong DataFrame dựa trên danh sách tên cột có thể xuất hiện.
-    Hàm này giúp app không bị lỗi nếu Google Sheets đổi tên cột nhẹ.
+    Chuẩn hóa tên cột theo yêu cầu:
+    - strip khoảng trắng
+    - title để đồng bộ kiểu viết
     """
 
-    normalized_columns = {
-        normalize_text(col): col
-        for col in df.columns
-    }
+    if pd.isna(col):
+        return ""
 
-    possible_names = [normalize_text(name) for name in possible_names]
-
-    # Ưu tiên khớp chính xác
-    for name in possible_names:
-        if name in normalized_columns:
-            return normalized_columns[name]
-
-    # Nếu không khớp chính xác thì dò gần đúng
-    for norm_col, real_col in normalized_columns.items():
-        for name in possible_names:
-            if name in norm_col or norm_col in name:
-                return real_col
-
-    return None
+    return str(col).strip().title()
 
 
 # ============================================================
-# 4. ĐỌC DỮ LIỆU GOOGLE SHEETS
-# Có dùng cache 5 phút để tránh tải lại dữ liệu liên tục
+# 4. HÀM ĐỌC TOÀN BỘ SHEET TỪ GOOGLE SHEETS DẠNG EXCEL
+# Yêu cầu:
+# - Không dùng pd.read_csv
+# - Dùng pd.read_excel(..., sheet_name=None)
+# - Cache dữ liệu trong 5 phút
+# - Bỏ qua các sheet báo cáo không dùng để tính KPI
+# - Gộp toàn bộ sheet hợp lệ thành một DataFrame tổng
 # ============================================================
 
 @st.cache_data(ttl=300)
-def load_data_from_google_sheet(csv_url):
-    """
-    Đọc dữ liệu từ Google Sheets thông qua link CSV.
-    Nếu lỗi mạng hoặc lỗi quyền truy cập, trả về DataFrame rỗng.
-    """
-
+def load_data_from_google_sheet(excel_url):
     try:
-        df = pd.read_csv(csv_url)
+        all_sheets = pd.read_excel(
+            excel_url,
+            sheet_name=None,
+            engine="openpyxl"
+        )
 
-        # Xóa các cột rỗng hoàn toàn nếu có
-        df = df.dropna(axis=1, how="all")
+        combined_data = []
 
-        return df
+        for sheet_name, sheet_df in all_sheets.items():
+            if sheet_name in SKIP_SHEETS:
+                continue
+
+            if sheet_df is None or sheet_df.empty:
+                continue
+
+            df = sheet_df.copy()
+
+            df = df.dropna(axis=0, how="all")
+            df = df.dropna(axis=1, how="all")
+
+            if df.empty:
+                continue
+
+            df.columns = [clean_column_name(col) for col in df.columns]
+
+            df["Loại Dịch Vụ"] = sheet_name
+
+            combined_data.append(df)
+
+        if not combined_data:
+            st.error("❌ Không tìm thấy sheet dữ liệu hợp lệ để xử lý KPI.")
+            return pd.DataFrame()
+
+        final_df = pd.concat(
+            combined_data,
+            ignore_index=True,
+            sort=False
+        )
+
+        return final_df
 
     except Exception as e:
         st.error(
-            f"❌ Không thể đọc dữ liệu từ Google Sheets. "
-            f"Vui lòng kiểm tra lại link, quyền chia sẻ hoặc kết nối mạng.\n\nChi tiết lỗi: {e}"
+            "❌ Không thể đọc dữ liệu từ Google Sheets dạng Excel. "
+            "Vui lòng kiểm tra lại link chia sẻ, quyền truy cập hoặc kết nối mạng."
         )
+        st.exception(e)
         return pd.DataFrame()
 
 
 # ============================================================
-# 5. XỬ LÝ MÚI GIỜ VIỆT NAM GMT+7
-# Yêu cầu:
-# - Ép cứng thời gian hiện tại theo Asia/Ho_Chi_Minh
-# - Không phụ thuộc timezone của server deploy
+# 5. HÀM LÀM SẠCH VÀ CHUẨN HÓA DỮ LIỆU
+# Mục đích:
+# - Gộp các cột cùng ý nghĩa
+# - Đổi tên về bộ cột chuẩn
+# - Ép kiểu ngày thực hiện về datetime
 # ============================================================
 
-def get_vietnam_now():
-    """
-    Lấy thời gian hiện tại theo múi giờ Việt Nam GMT+7.
-    Dùng pytz để tránh sai lệch khi deploy app lên cloud/server nước ngoài.
-    """
+def standardize_columns(df):
+    if df.empty:
+        return pd.DataFrame()
 
-    vietnam_tz = pytz.timezone("Asia/Ho_Chi_Minh")
-    now_vn = datetime.now(vietnam_tz)
-    return now_vn
+    data = df.copy()
+
+    data.columns = [clean_column_name(col) for col in data.columns]
+
+    rename_map = {}
+
+    for col in data.columns:
+        normalized_col = normalize_text(col)
+
+        if normalized_col in [
+            "nhan vien phu trach",
+            "nhan vien thuc hien",
+            "nguoi thuc hien",
+            "nhan vien",
+            "nv phu trach",
+            "nv thuc hien"
+        ]:
+            rename_map[col] = "Nhân Viên Thực Hiện"
+
+        elif normalized_col in [
+            "ket qua thuc hien",
+            "trang thai",
+            "ket qua",
+            "tinh trang"
+        ]:
+            rename_map[col] = "Trạng Thái"
+
+        elif normalized_col in [
+            "ngay thuc hien",
+            "ngay gia han",
+            "ngay xac thuc",
+            "ngay hoan thanh",
+            "ngay xu ly",
+            "thoi gian thuc hien"
+        ]:
+            rename_map[col] = "Ngày Thực Hiện"
+
+    data = data.rename(columns=rename_map)
+
+    required_columns = [
+        "Nhân Viên Thực Hiện",
+        "Ngày Thực Hiện",
+        "Trạng Thái"
+    ]
+
+    missing_columns = [
+        col for col in required_columns
+        if col not in data.columns
+    ]
+
+    if missing_columns:
+        st.error(
+            "❌ Dữ liệu đang thiếu cột bắt buộc: "
+            + ", ".join(missing_columns)
+        )
+        return pd.DataFrame()
+
+    data["Nhân Viên Thực Hiện"] = (
+        data["Nhân Viên Thực Hiện"]
+        .astype(str)
+        .str.strip()
+    )
+
+    data["Trạng Thái"] = (
+        data["Trạng Thái"]
+        .astype(str)
+        .str.strip()
+    )
+
+    data["Ngày Thực Hiện"] = pd.to_datetime(
+        data["Ngày Thực Hiện"],
+        errors="coerce",
+        dayfirst=True
+    )
+
+    data = data.dropna(subset=["Ngày Thực Hiện"])
+
+    data["Trạng Thái Chuẩn"] = data["Trạng Thái"].apply(normalize_text)
+    data["Nhân Viên Chuẩn"] = data["Nhân Viên Thực Hiện"].apply(normalize_text)
+
+    return data
 
 
 # ============================================================
-# 6. HÀM TÍNH TUẦN TRONG THÁNG
-# Không dùng .isocalendar().week vì đó là tuần trong năm.
+# 6. XỬ LÝ THỜI GIAN GMT+7
+# Dùng pytz để ép cứng timezone Asia/Ho_Chi_Minh.
+# Việc này giúp app không bị sai ngày khi deploy lên server nước ngoài.
+# ============================================================
+
+def get_current_vietnam_time():
+    vietnam_timezone = pytz.timezone("Asia/Ho_Chi_Minh")
+    return datetime.now(vietnam_timezone)
+
+
+# ============================================================
+# 7. TÍNH TUẦN TRONG THÁNG
+# Không dùng .isocalendar().week vì hàm đó trả về tuần trong năm.
 #
 # Quy ước:
 # - Ngày 01 - 07: Tuần 1
@@ -152,180 +263,60 @@ def get_vietnam_now():
 # ============================================================
 
 def get_week_of_month(date_value):
-    """
-    Tính tuần thứ mấy trong tháng, trả về giá trị từ 1 đến 5.
-    """
-
     day = date_value.day
     week = ((day - 1) // 7) + 1
     return min(week, 5)
 
 
-# ============================================================
-# 7. CHUẨN HÓA DATAFRAME
-# Mục đích:
-# - Dò đúng cột nhân viên
-# - Dò đúng cột ngày thực hiện
-# - Dò đúng cột trạng thái / kết quả thực hiện
-# - Tạo các cột chuẩn để xử lý KPI
-# ============================================================
-
-def prepare_dataframe(raw_df):
-    """
-    Chuẩn hóa dữ liệu đầu vào từ Google Sheets.
-    """
-
-    if raw_df.empty:
-        return pd.DataFrame()
-
-    df = raw_df.copy()
-
-    # Dò cột nhân viên
-    employee_col = find_column(
-        df,
-        [
-            "Nhân viên thực hiện",
-            "Nhân viên phụ trách",
-            "Nhân viên",
-            "Người thực hiện",
-            "NV thực hiện",
-            "NV phụ trách"
-        ]
-    )
-
-    # Dò cột ngày
-    date_col = find_column(
-        df,
-        [
-            "Ngày thực hiện",
-            "Ngày gia hạn",
-            "Ngày xác thực",
-            "Ngày hoàn thành",
-            "Ngày xử lý",
-            "Thời gian thực hiện"
-        ]
-    )
-
-    # Dò cột trạng thái / kết quả
-    status_col = find_column(
-        df,
-        [
-            "Trạng thái",
-            "KẾT QUẢ THỰC HIỆN",
-            "Kết quả thực hiện",
-            "Kết quả",
-            "Tình trạng"
-        ]
-    )
-
-    # Dò cột tên dịch vụ nếu có
-    service_col = find_column(
-        df,
-        [
-            "Tên dịch vụ",
-            "Dịch vụ",
-            "Loại dịch vụ",
-            "Sản phẩm",
-            "Tên sản phẩm",
-            "Gói dịch vụ"
-        ]
-    )
-
-    missing_cols = []
-
-    if employee_col is None:
-        missing_cols.append("Nhân viên thực hiện / Nhân viên phụ trách")
-
-    if date_col is None:
-        missing_cols.append("Ngày thực hiện")
-
-    if status_col is None:
-        missing_cols.append("Trạng thái / KẾT QUẢ THỰC HIỆN")
-
-    if missing_cols:
-        st.error(
-            "❌ Dữ liệu đang thiếu các cột bắt buộc: "
-            + ", ".join(missing_cols)
-        )
-        return pd.DataFrame()
-
-    # Tạo cột chuẩn để xử lý
-    df["__nhan_vien"] = df[employee_col].astype(str).str.strip()
-    df["__trang_thai"] = df[status_col].astype(str).str.strip()
-    df["__trang_thai_norm"] = df["__trang_thai"].apply(normalize_text)
-
-    # Chuyển cột ngày về dạng datetime
-    # dayfirst=True phù hợp định dạng ngày Việt Nam: dd/mm/yyyy
-    df["__ngay_thuc_hien"] = pd.to_datetime(
-        df[date_col],
-        errors="coerce",
-        dayfirst=True
-    )
-
-    # Nếu không có cột dịch vụ thì tạo cột mặc định
-    if service_col is not None:
-        df["__ten_dich_vu"] = df[service_col].astype(str).str.strip()
-    else:
-        df["__ten_dich_vu"] = "Chưa có thông tin dịch vụ"
-
-    # Loại các dòng không có ngày thực hiện
-    df = df.dropna(subset=["__ngay_thuc_hien"])
-
-    # Tạo thêm các cột ngày, tháng, năm, tuần trong tháng để tính KPI
-    df["__date"] = df["__ngay_thuc_hien"].dt.date
-    df["__year"] = df["__ngay_thuc_hien"].dt.year
-    df["__month"] = df["__ngay_thuc_hien"].dt.month
-
-    # Tính tuần trong tháng cho từng dòng dữ liệu
-    df["__week_of_month"] = df["__ngay_thuc_hien"].apply(get_week_of_month)
-
-    return df
-
-
-# ============================================================
-# 8. LỌC DỮ LIỆU ĐÃ GIA HẠN
-# Trigger chính: "Đã gia hạn"
-# Có chuẩn hóa để tránh lỗi do viết hoa / viết thường
-# ============================================================
-
-def filter_success_data(df):
-    """
-    Lọc các dòng có trạng thái là 'Đã gia hạn'.
-    """
-
-    if df.empty:
-        return pd.DataFrame()
-
-    success_df = df[df["__trang_thai_norm"] == "da gia han"].copy()
-
-    return success_df
-
-
-# ============================================================
-# 9. TÍNH KPI VÀ DELTA
-# Delta được tính như sau:
-# - Delta ngày = số ca hôm nay - số ca hôm qua
-# - Delta tuần = số ca tuần này - số ca tuần trước
-# - Delta tháng = số ca tháng này - số ca tháng trước
-# ============================================================
-
 def get_previous_month(year, month):
-    """
-    Trả về năm và tháng liền trước.
-    Ví dụ:
-    2026, 1 -> 2025, 12
-    """
-
     if month == 1:
         return year - 1, 12
 
     return year, month - 1
 
 
-def get_employee_kpi(success_df, employee_name, now_vn):
-    """
-    Tính KPI ngày, tuần, tháng và Delta cho từng nhân viên.
-    """
+# ============================================================
+# 8. LỌC DỮ LIỆU ĐÃ GIA HẠN
+# Điều kiện KPI:
+# - Cột Trạng Thái chứa chữ "Đã gia hạn"
+# - Có xử lý lower và bỏ dấu để tránh lỗi hoa/thường
+# ============================================================
+
+def filter_success_records(df):
+    if df.empty:
+        return pd.DataFrame()
+
+    success_df = df[
+        df["Trạng Thái Chuẩn"].str.contains(
+            "da gia han",
+            na=False
+        )
+    ].copy()
+
+    success_df["Ngày"] = success_df["Ngày Thực Hiện"].dt.date
+    success_df["Năm"] = success_df["Ngày Thực Hiện"].dt.year
+    success_df["Tháng"] = success_df["Ngày Thực Hiện"].dt.month
+    success_df["Tuần Trong Tháng"] = success_df["Ngày Thực Hiện"].apply(
+        get_week_of_month
+    )
+
+    return success_df
+
+
+# ============================================================
+# 9. TÍNH KPI VÀ DELTA
+# Delta:
+# - Delta Ngày = Hôm nay - Hôm qua
+# - Delta Tuần = Tuần này - Tuần trước
+# - Delta Tháng = Tháng này - Tháng trước
+# ============================================================
+
+def calculate_employee_kpi(success_df, employee_name, now_vn):
+    employee_norm = normalize_text(employee_name)
+
+    employee_df = success_df[
+        success_df["Nhân Viên Chuẩn"] == employee_norm
+    ].copy()
 
     today = now_vn.date()
     yesterday = today - timedelta(days=1)
@@ -339,104 +330,89 @@ def get_employee_kpi(success_df, employee_name, now_vn):
         current_month
     )
 
-    emp_df = success_df[
-        success_df["__nhan_vien"].apply(normalize_text)
-        == normalize_text(employee_name)
-    ].copy()
+    today_count = employee_df[
+        employee_df["Ngày"] == today
+    ].shape[0]
 
-    # -----------------------------
-    # KPI ngày
-    # -----------------------------
-    today_count = emp_df[emp_df["__date"] == today].shape[0]
-    yesterday_count = emp_df[emp_df["__date"] == yesterday].shape[0]
+    yesterday_count = employee_df[
+        employee_df["Ngày"] == yesterday
+    ].shape[0]
 
-    # Delta ngày: hôm nay so với hôm qua
     day_delta = today_count - yesterday_count
 
-    # -----------------------------
-    # KPI tuần trong tháng
-    # -----------------------------
-    this_week_count = emp_df[
-        (emp_df["__year"] == current_year)
-        & (emp_df["__month"] == current_month)
-        & (emp_df["__week_of_month"] == current_week)
+    this_week_count = employee_df[
+        (employee_df["Năm"] == current_year)
+        & (employee_df["Tháng"] == current_month)
+        & (employee_df["Tuần Trong Tháng"] == current_week)
     ].shape[0]
 
-    # Nếu đang ở tuần 1 thì tuần trước được hiểu là tuần 5 của tháng trước
     if current_week == 1:
-        previous_week_count = emp_df[
-            (emp_df["__year"] == previous_month_year)
-            & (emp_df["__month"] == previous_month)
-            & (emp_df["__week_of_month"] == 5)
+        previous_week_count = employee_df[
+            (employee_df["Năm"] == previous_month_year)
+            & (employee_df["Tháng"] == previous_month)
+            & (employee_df["Tuần Trong Tháng"] == 5)
         ].shape[0]
     else:
-        previous_week_count = emp_df[
-            (emp_df["__year"] == current_year)
-            & (emp_df["__month"] == current_month)
-            & (emp_df["__week_of_month"] == current_week - 1)
+        previous_week_count = employee_df[
+            (employee_df["Năm"] == current_year)
+            & (employee_df["Tháng"] == current_month)
+            & (employee_df["Tuần Trong Tháng"] == current_week - 1)
         ].shape[0]
 
-    # Delta tuần: tuần này so với tuần trước
     week_delta = this_week_count - previous_week_count
 
-    # -----------------------------
-    # KPI tháng
-    # -----------------------------
-    this_month_count = emp_df[
-        (emp_df["__year"] == current_year)
-        & (emp_df["__month"] == current_month)
+    this_month_count = employee_df[
+        (employee_df["Năm"] == current_year)
+        & (employee_df["Tháng"] == current_month)
     ].shape[0]
 
-    previous_month_count = emp_df[
-        (emp_df["__year"] == previous_month_year)
-        & (emp_df["__month"] == previous_month)
+    previous_month_count = employee_df[
+        (employee_df["Năm"] == previous_month_year)
+        & (employee_df["Tháng"] == previous_month)
     ].shape[0]
 
-    # Delta tháng: tháng này so với tháng trước
     month_delta = this_month_count - previous_month_count
 
     return {
-        "employee": employee_name,
-        "today_count": today_count,
-        "day_delta": day_delta,
-        "week_count": this_week_count,
-        "week_delta": week_delta,
-        "month_count": this_month_count,
-        "month_delta": month_delta
+        "Nhân Viên": employee_name,
+        "KPI Hôm Nay": today_count,
+        "Delta Ngày": day_delta,
+        "KPI Tuần Này": this_week_count,
+        "Delta Tuần": week_delta,
+        "KPI Tháng Này": this_month_count,
+        "Delta Tháng": month_delta
     }
 
 
-def build_kpi_table(success_df, now_vn):
-    """
-    Tạo bảng KPI tổng hợp cho 5 nhân sự.
-    """
-
-    kpi_rows = []
+def build_kpi_dataframe(success_df, now_vn):
+    kpi_data = []
 
     for employee in EMPLOYEES:
-        kpi_rows.append(
-            get_employee_kpi(success_df, employee, now_vn)
+        kpi_data.append(
+            calculate_employee_kpi(
+                success_df=success_df,
+                employee_name=employee,
+                now_vn=now_vn
+            )
         )
 
-    return pd.DataFrame(kpi_rows)
+    return pd.DataFrame(kpi_data)
 
 
 # ============================================================
-# 10. TẠO GIAO DIỆN APP
+# 10. HEADER APP
 # ============================================================
 
-st.title("📊 Dashboard KPI Gia Hạn DVCNTT")
+st.title("📊 Dashboard KPI Gia Hạn Dịch Vụ CNTT / Viễn Thông")
 
-# Lấy thời gian Việt Nam GMT+7
-now_vn = get_vietnam_now()
-current_week_of_month = get_week_of_month(now_vn)
+now_vn = get_current_vietnam_time()
+current_week = get_week_of_month(now_vn)
 
-# In thông báo thời gian dưới tiêu đề
 st.markdown(
     f"""
-    **⏳ Dữ liệu cập nhật: Ngày {now_vn.strftime('%d/%m/%Y')} 
+    **⏳ Dữ liệu cập nhật: Ngày {now_vn.strftime("%d/%m/%Y")} 
     | Tháng: {now_vn.month} 
-    | Tuần thứ: {current_week_of_month} trong tháng**
+    | Tuần thứ: {current_week} trong tháng**
     """
 )
 
@@ -444,24 +420,28 @@ st.divider()
 
 
 # ============================================================
-# 11. LOAD VÀ XỬ LÝ DỮ LIỆU
+# 11. LOAD DỮ LIỆU
 # ============================================================
 
-raw_df = load_data_from_google_sheet(CSV_URL)
-df = prepare_dataframe(raw_df)
-success_df = filter_success_data(df)
+raw_df = load_data_from_google_sheet(EXCEL_URL)
 
-if df.empty:
-    st.warning("⚠️ Chưa có dữ liệu hợp lệ để hiển thị Dashboard.")
+if raw_df.empty:
+    st.warning("⚠️ Không có dữ liệu đầu vào hợp lệ.")
     st.stop()
+
+clean_df = standardize_columns(raw_df)
+
+if clean_df.empty:
+    st.warning("⚠️ Dữ liệu sau khi làm sạch không hợp lệ.")
+    st.stop()
+
+success_df = filter_success_records(clean_df)
 
 if success_df.empty:
     st.warning("⚠️ Không tìm thấy dòng nào có trạng thái 'Đã gia hạn'.")
     st.stop()
 
-
-# Tạo bảng KPI cho 5 nhân viên
-kpi_df = build_kpi_table(success_df, now_vn)
+kpi_df = build_kpi_dataframe(success_df, now_vn)
 
 
 # ============================================================
@@ -469,26 +449,27 @@ kpi_df = build_kpi_table(success_df, now_vn)
 # ============================================================
 
 with st.sidebar:
-    st.header("⚙️ Bộ lọc & Thông tin")
+    st.header("⚙️ Thông tin hệ thống")
 
-    st.write("**Nguồn dữ liệu:** Google Sheets CSV")
-    st.write("**Cache:** 5 phút")
+    st.write("**Nguồn dữ liệu:** Google Sheets Excel")
+    st.write("**Định dạng đọc:** `.xlsx`")
+    st.write("**Cache:** 300 giây")
     st.write("**Timezone:** Asia/Ho_Chi_Minh GMT+7")
 
     st.divider()
 
-    selected_metric = st.radio(
+    metric_mode = st.radio(
         "Chỉ số hiển thị trên thẻ KPI",
         [
-            "KPI Tháng này",
-            "KPI Tuần này",
-            "KPI Hôm nay"
+            "KPI Tháng Này",
+            "KPI Tuần Này",
+            "KPI Hôm Nay"
         ],
         index=0
     )
 
     st.caption(
-        "Mặc định nên dùng KPI Tháng này để theo dõi tiến độ tổng thể."
+        "Mặc định dùng KPI Tháng để phù hợp với biểu đồ và bảng chi tiết."
     )
 
 
@@ -496,39 +477,40 @@ with st.sidebar:
 # 13. KHU VỰC 1 - METRIC CARDS
 # ============================================================
 
-st.subheader("📌 Khu vực 1 - Thẻ chỉ số KPI theo nhân viên")
+st.subheader("📌 Khu vực 1 - Thẻ KPI theo nhân viên")
 
-cols = st.columns(5)
+metric_columns = st.columns(5)
 
 for index, employee in enumerate(EMPLOYEES):
-    employee_kpi = kpi_df[kpi_df["employee"] == employee].iloc[0]
+    employee_kpi = kpi_df[
+        kpi_df["Nhân Viên"] == employee
+    ].iloc[0]
 
-    if selected_metric == "KPI Tháng này":
-        metric_value = employee_kpi["month_count"]
-        metric_delta = employee_kpi["month_delta"]
-        metric_label = "Tháng này"
+    if metric_mode == "KPI Tháng Này":
+        value = employee_kpi["KPI Tháng Này"]
+        delta = employee_kpi["Delta Tháng"]
+        help_text = "KPI tháng này so với tháng trước"
 
-    elif selected_metric == "KPI Tuần này":
-        metric_value = employee_kpi["week_count"]
-        metric_delta = employee_kpi["week_delta"]
-        metric_label = "Tuần này"
+    elif metric_mode == "KPI Tuần Này":
+        value = employee_kpi["KPI Tuần Này"]
+        delta = employee_kpi["Delta Tuần"]
+        help_text = "KPI tuần này so với tuần trước trong tháng"
 
     else:
-        metric_value = employee_kpi["today_count"]
-        metric_delta = employee_kpi["day_delta"]
-        metric_label = "Hôm nay"
+        value = employee_kpi["KPI Hôm Nay"]
+        delta = employee_kpi["Delta Ngày"]
+        help_text = "KPI hôm nay so với hôm qua"
 
-    # st.metric tự động hiện mũi tên xanh/đỏ dựa trên delta
-    cols[index].metric(
-        label=f"{employee}",
-        value=f"{metric_value} ca",
-        delta=f"{metric_delta:+d} ca",
-        help=f"KPI {metric_label} so với kỳ liền trước"
+    metric_columns[index].metric(
+        label=employee,
+        value=f"{int(value)} ca",
+        delta=f"{int(delta):+d} ca",
+        help=help_text
     )
 
 st.caption(
-    "Delta: số ca kỳ hiện tại trừ số ca kỳ trước. "
-    "Ví dụ: Tháng này - Tháng trước, Tuần này - Tuần trước."
+    "Delta được tính bằng số ca kỳ hiện tại trừ số ca kỳ liền trước. "
+    "Streamlit sẽ tự hiển thị mũi tên xanh hoặc đỏ theo giá trị delta."
 )
 
 st.divider()
@@ -538,32 +520,24 @@ st.divider()
 # 14. KHU VỰC 2 - BIỂU ĐỒ TRỰC QUAN
 # ============================================================
 
-st.subheader("📈 Khu vực 2 - Trực quan hóa KPI tháng")
+st.subheader("📈 Khu vực 2 - Biểu đồ trực quan KPI tháng")
 
-chart_left, chart_right = st.columns(2)
-
-# Chuẩn bị dữ liệu biểu đồ tháng
-chart_df = kpi_df[["employee", "month_count"]].copy()
+chart_df = kpi_df[["Nhân Viên", "KPI Tháng Này"]].copy()
 chart_df = chart_df.rename(
     columns={
-        "employee": "Nhân viên",
-        "month_count": "Số ca đã gia hạn"
+        "KPI Tháng Này": "Số Ca Đã Gia Hạn"
     }
 )
 
-# -----------------------------
-# Biểu đồ cột Plotly
-# -----------------------------
-# Màu cột dùng xanh dương.
-# Layout tối giản, ẩn gridline rườm rà, phù hợp nền sáng/tối của Streamlit.
-# -----------------------------
-with chart_left:
+left_chart, right_chart = st.columns(2)
+
+with left_chart:
     fig_bar = px.bar(
         chart_df,
-        x="Nhân viên",
-        y="Số ca đã gia hạn",
-        text="Số ca đã gia hạn",
-        title="So sánh KPI tháng theo nhân viên"
+        x="Nhân Viên",
+        y="Số Ca Đã Gia Hạn",
+        text="Số Ca Đã Gia Hạn",
+        title="So sánh KPI tháng giữa 5 nhân viên"
     )
 
     fig_bar.update_traces(
@@ -574,10 +548,10 @@ with chart_left:
     fig_bar.update_layout(
         xaxis_title=None,
         yaxis_title=None,
+        showlegend=False,
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=20, r=20, t=60, b=20),
-        showlegend=False
+        margin=dict(l=20, r=20, t=60, b=20)
     )
 
     fig_bar.update_xaxes(
@@ -589,19 +563,16 @@ with chart_left:
         showgrid=False
     )
 
-    st.plotly_chart(fig_bar, use_container_width=True)
+    st.plotly_chart(
+        fig_bar,
+        use_container_width=True
+    )
 
-
-# -----------------------------
-# Biểu đồ Donut Chart
-# -----------------------------
-# Thể hiện tỷ lệ đóng góp KPI tháng của từng nhân viên.
-# -----------------------------
-with chart_right:
+with right_chart:
     fig_donut = px.pie(
         chart_df,
-        names="Nhân viên",
-        values="Số ca đã gia hạn",
+        names="Nhân Viên",
+        values="Số Ca Đã Gia Hạn",
         hole=0.55,
         title="Tỷ lệ đóng góp KPI tháng"
     )
@@ -612,19 +583,22 @@ with chart_right:
     )
 
     fig_donut.update_layout(
+        legend_title_text="",
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=20, r=20, t=60, b=20),
-        legend_title_text=""
+        margin=dict(l=20, r=20, t=60, b=20)
     )
 
-    st.plotly_chart(fig_donut, use_container_width=True)
+    st.plotly_chart(
+        fig_donut,
+        use_container_width=True
+    )
 
 st.divider()
 
 
 # ============================================================
-# 15. KHU VỰC 3 - TRA CỨU CHI TIẾT THEO NHÂN VIÊN
+# 15. KHU VỰC 3 - DRILL-DOWN TABLE
 # ============================================================
 
 st.subheader("🔎 Khu vực 3 - Tra cứu chi tiết ca đã gia hạn")
@@ -634,16 +608,17 @@ selected_employee = st.selectbox(
     EMPLOYEES
 )
 
-# Lọc dữ liệu thành công trong tháng hiện tại của nhân viên được chọn
+selected_employee_norm = normalize_text(selected_employee)
+
 detail_df = success_df[
-    (success_df["__nhan_vien"].apply(normalize_text) == normalize_text(selected_employee))
-    & (success_df["__year"] == now_vn.year)
-    & (success_df["__month"] == now_vn.month)
+    (success_df["Nhân Viên Chuẩn"] == selected_employee_norm)
+    & (success_df["Năm"] == now_vn.year)
+    & (success_df["Tháng"] == now_vn.month)
 ].copy()
 
 st.markdown(
-    f"**Nhân viên đang xem:** {selected_employee} | "
-    f"**Số ca đã gia hạn trong tháng:** {detail_df.shape[0]} ca"
+    f"**Nhân viên:** {selected_employee} | "
+    f"**Số ca đã gia hạn trong tháng {now_vn.month}:** {detail_df.shape[0]} ca"
 )
 
 if detail_df.empty:
@@ -652,54 +627,45 @@ if detail_df.empty:
         f"cho nhân viên {selected_employee}."
     )
 else:
-    # Ưu tiên hiển thị các cột dễ đọc.
-    # Nếu dữ liệu gốc có nhiều cột khác, vẫn giữ lại bên dưới.
-    display_df = detail_df.copy()
-
-    display_df.insert(0, "Nhân viên", display_df["__nhan_vien"])
-    display_df.insert(1, "Tên dịch vụ", display_df["__ten_dich_vu"])
-    display_df.insert(
-        2,
-        "Ngày thực hiện",
-        display_df["__ngay_thuc_hien"].dt.strftime("%d/%m/%Y")
-    )
-    display_df.insert(3, "Trạng thái", display_df["__trang_thai"])
-    display_df.insert(4, "Tuần trong tháng", display_df["__week_of_month"])
-
-    # Ẩn các cột kỹ thuật bắt đầu bằng "__"
-    technical_cols = [
-        col for col in display_df.columns
-        if str(col).startswith("__")
+    display_columns = [
+        "Nhân Viên Thực Hiện",
+        "Loại Dịch Vụ",
+        "Ngày Thực Hiện",
+        "Trạng Thái"
     ]
 
-    display_df = display_df.drop(columns=technical_cols, errors="ignore")
+    available_columns = [
+        col for col in display_columns
+        if col in detail_df.columns
+    ]
+
+    table_df = detail_df[available_columns].copy()
+
+    if "Ngày Thực Hiện" in table_df.columns:
+        table_df["Ngày Thực Hiện"] = table_df["Ngày Thực Hiện"].dt.strftime(
+            "%d/%m/%Y"
+        )
+
+    table_df = table_df.rename(
+        columns={
+            "Nhân Viên Thực Hiện": "Nhân Viên"
+        }
+    )
 
     st.dataframe(
-        display_df,
+        table_df,
         use_container_width=True,
         hide_index=True
     )
 
 
 # ============================================================
-# 16. BẢNG KPI TỔNG HỢP PHỤ
+# 16. BẢNG KPI TỔNG HỢP
 # ============================================================
 
 with st.expander("📋 Xem bảng KPI tổng hợp ngày / tuần / tháng"):
-    summary_df = kpi_df.rename(
-        columns={
-            "employee": "Nhân viên",
-            "today_count": "KPI hôm nay",
-            "day_delta": "Delta ngày",
-            "week_count": "KPI tuần này",
-            "week_delta": "Delta tuần",
-            "month_count": "KPI tháng này",
-            "month_delta": "Delta tháng"
-        }
-    )
-
     st.dataframe(
-        summary_df,
+        kpi_df,
         use_container_width=True,
         hide_index=True
     )
@@ -712,7 +678,7 @@ with st.expander("📋 Xem bảng KPI tổng hợp ngày / tuần / tháng"):
 st.divider()
 
 st.caption(
-    "Dashboard tự động đọc dữ liệu từ Google Sheets, "
-    "lọc trạng thái 'Đã gia hạn', tính KPI theo ngày / tuần / tháng "
-    "và cập nhật cache mỗi 5 phút."
+    "Ứng dụng tự động đọc toàn bộ sheet dữ liệu hợp lệ từ Google Sheets Excel, "
+    "lọc các dòng có trạng thái 'Đã gia hạn', tính KPI theo ngày / tuần / tháng, "
+    "và cập nhật dữ liệu theo cache 5 phút."
 )
